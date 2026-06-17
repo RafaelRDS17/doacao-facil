@@ -16,6 +16,10 @@ import {
   Alert
 } from 'react-native';
 
+// SUPABASE - importamos o cliente que configuramos no arquivo supabase.js
+import { supabase } from './supabase';
+
+
 export default function App() {
 
   // MEMÓRIA DO APP - guarda o nome que o usuário digitar
@@ -33,9 +37,15 @@ export default function App() {
   const [nomeItem, setNomeItem] = useState('');
   const [descricaoItem, setDescricaoItem] = useState('');
 
-  // QUANDO O APP ABRE - verifica se já tem dados salvos no celular
+  // MEMÓRIA DO APP - lista de todos os itens (agora vem do Supabase)
+  const [itens, setItens] = useState([]);
+
+  // MEMÓRIA DO APP - guarda a foto escolhida pelo doador
+  const [fotoItem, setFotoItem] = useState(null);
+
+  // QUANDO O APP ABRE - carrega o perfil salvo e os itens do Supabase
   useEffect(() => {
-    async function carregarPerfil() {
+    async function carregarTudo() {
       const nomeSalvo     = await AsyncStorage.getItem('nome');
       const cidadeSalva   = await AsyncStorage.getItem('cidade');
       const dddSalvo      = await AsyncStorage.getItem('ddd');
@@ -49,17 +59,34 @@ export default function App() {
 
       // se já tem nome salvo, pula direto para a tela inicial
       if (nomeSalvo) setTela('inicio');
+
+      // busca os itens lá no banco de dados na nuvem
+      await carregarItens();
     }
 
-    carregarPerfil();
+    carregarTudo();
   }, []); // o [] significa: rode isso apenas uma vez, quando o app abrir
 
-  // MEMÓRIA DO APP - lista de todos os itens cadastrados para doação
-  const [itens, setItens] = useState([]);
 
+  // FUNÇÃO QUE BUSCA OS ITENS NO SUPABASE E TRAZ PARA O APP
+  async function carregarItens() {
+    // .from('itens') → nome da tabela que criamos no Supabase
+    // .select('*')   → pega todas as colunas da tabela
+    // .order(...)    → ordena do mais recente para o mais antigo
+    const { data, error } = await supabase
+      .from('itens')
+      .select('*')
+      .order('criado_em', { ascending: false });
 
-  // MEMÓRIA DO APP - guarda a foto escolhida pelo doador
-  const [fotoItem, setFotoItem] = useState(null);
+    if (error) {
+      Alert.alert('Erro', 'Não foi possível carregar os itens. Verifique sua conexão.');
+      return;
+    }
+
+    // data é o array de itens que veio do banco — colocamos na memória do app
+    setItens(data);
+  }
+
 
   // FUNÇÃO QUE PERGUNTA: CÂMERA OU GALERIA?
   function escolherFoto() {
@@ -67,8 +94,8 @@ export default function App() {
       'Adicionar Foto',
       'De onde você quer a foto?',
       [
-        { text: 'Câmera',  onPress: () => abrirCamera()  },
-        { text: 'Galeria', onPress: () => abrirGaleria() },
+        { text: 'Câmera',   onPress: () => abrirCamera()  },
+        { text: 'Galeria',  onPress: () => abrirGaleria() },
         { text: 'Cancelar', style: 'cancel' }
       ]
     );
@@ -86,8 +113,7 @@ export default function App() {
 
     const resultado = await ImagePicker.launchCameraAsync({
       allowsEditing: true,
-      aspect: [4, 3],
-      quality: 0.8
+      quality: 1        // qualidade máxima da foto
     });
 
     if (!resultado.canceled) {
@@ -100,8 +126,7 @@ export default function App() {
     const resultado = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
       allowsEditing: true,
-      aspect: [4, 3],
-      quality: 0.8
+      quality: 1        // qualidade máxima da foto
     });
 
     if (!resultado.canceled) {
@@ -109,22 +134,52 @@ export default function App() {
     }
   }
 
-  // FUNÇÃO QUE SALVA O ITEM NA LISTA QUANDO O DOADOR TOCA EM "CADASTRAR"
-  function cadastrarItem() {
 
-    // monta o objeto com todos os dados do item e do doador
-    const novoItem = {
-      id: Date.now(),       // ID único usando a hora atual
-      foto: fotoItem,
-      nome: nomeItem || 'Item sem nome',
+  // FUNÇÃO QUE SALVA O ITEM NO SUPABASE QUANDO O DOADOR TOCA EM "CADASTRAR"
+  async function cadastrarItem() {
+
+    // PASSO 1: se tem foto, envia ela para o Supabase Storage (armazenamento de arquivos na nuvem)
+    let fotoUrl = null;
+
+    if (fotoItem) {
+      // converte a foto em dados que podem ser enviados pela internet
+      const arrayBuffer = await fetch(fotoItem).then(res => res.arrayBuffer());
+      const nomeArquivo = `foto_${Date.now()}.jpg`; // nome único usando a hora atual
+
+      // .from('fotos') → bucket (pasta) que criamos no Supabase Storage
+      // .upload(...)   → envia o arquivo para a nuvem
+      const { error: erroUpload } = await supabase.storage
+        .from('fotos')
+        .upload(nomeArquivo, arrayBuffer, { contentType: 'image/jpeg' });
+
+      if (!erroUpload) {
+        // pega o link público da foto — qualquer celular pode acessar esse link
+        const { data } = supabase.storage
+          .from('fotos')
+          .getPublicUrl(nomeArquivo);
+        fotoUrl = data.publicUrl;
+      }
+    }
+
+    // PASSO 2: salva os dados do item no banco de dados do Supabase
+    // .from('itens') → nossa tabela
+    // .insert({...}) → insere uma nova linha com esses dados
+    const { error } = await supabase.from('itens').insert({
+      nome:      nomeItem || 'Item sem nome',
       descricao: descricaoItem || 'Sem descrição',
-      doador: nome,
-      cidade: cidade,
-      contato: '(' + ddd + ') ' + telefone
-    };
+      foto_url:  fotoUrl,           // link da foto no Storage (ou null se não teve foto)
+      doador:    nome,
+      cidade:    cidade,
+      contato:   '(' + ddd + ') ' + telefone
+    });
 
-    // adiciona o novo item à lista existente
-    setItens([...itens, novoItem]);
+    if (error) {
+      Alert.alert('Erro', 'Não foi possível cadastrar o item. Verifique sua conexão.');
+      return;
+    }
+
+    // PASSO 3: recarrega a lista atualizada direto do Supabase
+    await carregarItens();
 
     // limpa os campos do formulário após cadastrar
     setFotoItem(null);
@@ -133,6 +188,42 @@ export default function App() {
 
     // mostra uma janela de confirmação bem visível
     Alert.alert('Sucesso!', 'Seu item foi cadastrado para doação.');
+  }
+
+
+  // FUNÇÃO QUE EXCLUI UM ITEM DO SUPABASE
+  async function excluirItem(id) {
+
+    // pede confirmação antes de excluir (segurança para não excluir por engano)
+    Alert.alert(
+      'Excluir anúncio',
+      'Tem certeza que quer excluir este anúncio?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Excluir',
+          style: 'destructive',
+          onPress: async () => {
+            // .from('itens') → nossa tabela
+            // .delete()      → apaga a linha
+            // .eq('id', id)  → somente onde o id for igual ao id do item escolhido
+            const { error } = await supabase
+              .from('itens')
+              .delete()
+              .eq('id', id);
+
+            if (error) {
+              Alert.alert('Erro', 'Não foi possível excluir o anúncio.');
+              return;
+            }
+
+            // recarrega a lista já sem o item excluído
+            await carregarItens();
+            Alert.alert('Pronto!', 'Anúncio excluído com sucesso.');
+          }
+        }
+      ]
+    );
   }
 
 
@@ -235,7 +326,7 @@ export default function App() {
         {/* ÁREA DOS BOTÕES */}
         <View style={styles.areaBotoes}>
 
-          {/* BOTÃO PARA QUEM QUER DOAR - agora navega para a tela do doador */}
+          {/* BOTÃO PARA QUEM QUER DOAR */}
           <TouchableOpacity
             style={styles.botaoDourado}
             onPress={() => setTela('doador')}
@@ -280,7 +371,7 @@ export default function App() {
           Preencha os dados do item que deseja doar
         </Text>
 
-        {/* BOTÃO PARA ABRIR A GALERIA */}
+        {/* BOTÃO PARA ESCOLHER FOTO */}
         <TouchableOpacity style={styles.botaoFoto} onPress={escolherFoto}>
           <Text style={styles.textoBotaoFoto}>+ Adicionar Foto do Item</Text>
         </TouchableOpacity>
@@ -314,7 +405,7 @@ export default function App() {
         {/* ÁREA DOS BOTÕES */}
         <View style={styles.areaBotoes}>
 
-          {/* BOTÃO CADASTRAR - agora salva o item na lista */}
+          {/* BOTÃO CADASTRAR - salva no Supabase */}
           <TouchableOpacity
             style={styles.botaoDourado}
             onPress={cadastrarItem}
@@ -322,7 +413,7 @@ export default function App() {
             <Text style={styles.textoBotaoDourado}>Cadastrar</Text>
           </TouchableOpacity>
 
-          {/* BOTÃO VOLTAR - retorna para a tela inicial */}
+          {/* BOTÃO VOLTAR */}
           <TouchableOpacity
             style={styles.botaoVoltar}
             onPress={() => setTela('inicio')}
@@ -359,14 +450,25 @@ export default function App() {
           </Text>
         )}
 
-        {/* LISTA DE ITENS - um card para cada item cadastrado */}
-        {itens.map((item) => (
+        {/* LISTA DE ITENS - ordenada: seus anúncios primeiro, depois os dos outros */}
+        {itens
+          .slice() // cria uma cópia da lista para não alterar a original
+          .sort((a, b) => {
+            // o .sort() compara dois itens por vez (a e b) e decide a ordem
+            // retornar -1 → 'a' vem antes de 'b'
+            // retornar  1 → 'b' vem antes de 'a'
+            // retornar  0 → mantém a ordem atual entre os dois
+            if (a.doador === nome && b.doador !== nome) return -1; // meu item sobe
+            if (b.doador === nome && a.doador !== nome) return  1; // item alheio desce
+            return 0; // ambos meus ou ambos de outros → mantém a ordem
+          })
+          .map((item) => (
           <View key={item.id} style={styles.card}>
 
-            {/* FOTO DO ITEM - só aparece se o doador adicionou foto */}
-            {item.foto && (
+            {/* FOTO DO ITEM - agora vem do link público do Supabase Storage */}
+            {item.foto_url && (
               <Image
-                source={{ uri: item.foto }}
+                source={{ uri: item.foto_url }}
                 style={styles.fotoCard}
                 resizeMode="cover"
               />
@@ -396,6 +498,16 @@ export default function App() {
             >
               <Text style={styles.textoBotaoInteresse}>Tenho Interesse</Text>
             </TouchableOpacity>
+
+            {/* BOTÃO EXCLUIR - só aparece se o nome do doador for igual ao seu nome */}
+            {item.doador === nome && (
+              <TouchableOpacity
+                style={styles.botaoExcluir}
+                onPress={() => excluirItem(item.id)}
+              >
+                <Text style={styles.textoBotaoExcluir}>Excluir meu anúncio</Text>
+              </TouchableOpacity>
+            )}
 
           </View>
         ))}
@@ -532,21 +644,6 @@ const styles = StyleSheet.create({
     fontSize: 16
   },
 
-  // mensagem verde que aparece após cadastrar com sucesso
-  mensagemSucesso: {
-    width: '100%',
-    backgroundColor: '#FFF3CD',
-    borderWidth: 1,
-    borderColor: '#C9A84C',
-    color: '#7A5200',
-    fontSize: 15,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 12
-  },
-
   // botão de adicionar foto
   botaoFoto: {
     width: '100%',
@@ -611,7 +708,8 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#C9A84C'
+    borderColor: '#C9A84C',
+    marginBottom: 12
   },
 
   // texto do botão branco
@@ -644,7 +742,7 @@ const styles = StyleSheet.create({
   // foto dentro do card
   fotoCard: {
     width: '100%',
-    height: 180,
+    height: 280,
     borderRadius: 8,
     marginBottom: 12
   },
@@ -684,13 +782,32 @@ const styles = StyleSheet.create({
     backgroundColor: '#C9A84C',
     padding: 12,
     borderRadius: 8,
-    alignItems: 'center'
+    alignItems: 'center',
+    marginBottom: 8
   },
 
   // texto do botão de interesse
   textoBotaoInteresse: {
     color: '#FFFFFF',
     fontSize: 15,
+    fontWeight: 'bold'
+  },
+
+  // botão de excluir - aparece em vermelho claro (indica ação destrutiva)
+  botaoExcluir: {
+    backgroundColor: '#FFF0F0',
+    borderWidth: 1,
+    borderColor: '#E57373',
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 4
+  },
+
+  // texto do botão excluir
+  textoBotaoExcluir: {
+    color: '#C62828',
+    fontSize: 14,
     fontWeight: 'bold'
   },
 
